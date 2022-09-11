@@ -88,10 +88,9 @@ fn slice_to_i32_be(data: &[u8]) -> i32 {
 fn send_to_server(stream: &mut TcpStream, buff: &[u8], n: usize) {
     let mut s: usize = 0;
     while s != n {
-        match stream.write(&buff[s..n]) {
-            Ok(written_back) => s += written_back,
-            Err(_) => panic!("Failed to send back to the server"),
-        }
+        s += stream
+            .write(&buff[s..n])
+            .expect("Failed to send back to the server");
     }
 }
 

@@ -5,10 +5,9 @@ use std::thread;
 fn echo_back(stream: &mut TcpStream, buff: &[u8], n: usize) {
     let mut s: usize = 0;
     while s != n {
-        match stream.write(&buff[s..n]) {
-            Ok(written_back) => s += written_back,
-            Err(_) => break
-        }
+        s += stream
+            .write(&buff[s..n])
+            .expect("Server does not want to receive our message");
     }
 }
 
@@ -20,14 +19,9 @@ fn handle_echo(mut stream: TcpStream) {
         let read = stream.read(&mut buff);
 
         match read {
-            Ok(n) => {
-                if n == 0 {
-                    // EOF
-                    break;
-                }
-                echo_back(&mut stream, &buff, n);
-            }
-            _ => break,
+            Ok(0) => break, // EOF
+            Ok(n) => echo_back(&mut stream, &buff, n),
+            _ => break, // Unhandled error
         };
     }
 }

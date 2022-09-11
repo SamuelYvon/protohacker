@@ -6,8 +6,8 @@ use std::thread;
 
 const VALID_METHOD: &str = "isPrime";
 const INVALID_METHOD: &str = "invalid";
-const ERR_INVALID_PAYLOAD : & str = "Failed to parse the json payload";
-const ERR_INVALID_METHOD : &str = "Error, invalid request method";
+const ERR_INVALID_PAYLOAD: &str = "Failed to parse the json payload";
+const ERR_INVALID_METHOD: &str = "Error, invalid request method";
 
 #[derive(Deserialize)]
 struct ServerRequest {
@@ -24,10 +24,9 @@ struct ServerReply {
 fn echo_back(stream: &mut TcpStream, buff: &[u8], n: usize) {
     let mut s: usize = 0;
     while s != n {
-        match stream.write(&buff[s..n]) {
-            Ok(written_back) => s += written_back,
-            Err(_) => panic!("Failed to send back to the server"),
-        }
+        s += stream
+            .write(&buff[s..n])
+            .expect("Failed to send back to the server");
     }
 }
 
@@ -36,7 +35,7 @@ fn dumb_is_prime(number: u64) -> bool {
 
     if number <= 1 {
         return false;
-    } else if number == 2{
+    } else if number == 2 {
         return true;
     }
 
@@ -52,15 +51,15 @@ fn dumb_is_prime(number: u64) -> bool {
     true
 }
 
-fn check_well_formated_request(request: &ServerRequest) -> std::result::Result<bool, &'static str> { 
+fn check_well_formated_request(request: &ServerRequest) -> std::result::Result<bool, &'static str> {
     // w/o the static lifetime, the compiler cannot infer the &str does not come from server request
-    
+
     if request.method != VALID_METHOD {
         return Err(ERR_INVALID_METHOD);
     }
 
     let n = request.number;
-    let is_not_float = n.fract() == 0.0 ;
+    let is_not_float = n.fract() == 0.0;
 
     Ok(is_not_float && dumb_is_prime(n as u64))
 }
@@ -73,31 +72,24 @@ fn generate_response(stream: &mut TcpStream, request: &[u8]) -> bool {
 
     let request: Result<ServerRequest> = serde_json::from_str(&query);
 
-    let is_prime = match request {
-        Ok(req) => check_well_formated_request(&req),
-        Err(_) => Err(ERR_INVALID_PAYLOAD)
-    };
+    let is_prime = request
+        .map_err(|_| ERR_INVALID_PAYLOAD)
+        .and_then(|req| check_well_formated_request(&req));
 
     println!("Generating response...");
 
-    let mut ok = false;
+    let (ok, method, prime) = is_prime.map_or((false, INVALID_METHOD, false), |is_prime| {
+        (true, VALID_METHOD, is_prime)
+    });
 
-    let reply: ServerReply = match is_prime {
-        Ok(is_prime) => {
-            ok = true;
-            ServerReply {
-                method: VALID_METHOD.to_string(),
-                prime: is_prime,
-            }
-        }
-        Err(_) => ServerReply {
-            method: INVALID_METHOD.to_string(),
-            prime: false,
-        },
+    let reply = ServerReply {
+        method: method.to_string(),
+        prime,
     };
 
     let mut reply_buff = serde_json::to_vec(&reply).unwrap();
-    reply_buff.push(b'\n'); // responses require newlines
+    // responses require newlines
+    reply_buff.push(b'\n');
 
     echo_back(stream, &reply_buff, reply_buff.len());
 
@@ -116,7 +108,11 @@ fn take_requests(stream: &mut TcpStream) {
         println!("Continuing");
 
         do_continue = loop {
-            let read = if do_read { stream.read(&mut buff[w..n]) } else { Ok(0) };
+            let read = if do_read {
+                stream.read(&mut buff[w..n])
+            } else {
+                Ok(0)
+            };
 
             match (w, read) {
                 (0, Ok(0)) => break false, // EOF
