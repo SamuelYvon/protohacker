@@ -100,11 +100,11 @@ fn handle_client(stream: &mut TcpStream) {
     let mut w: usize = 0;
     let mut buffer: [u8; 9] = [0; 9];
     loop {
-        match stream.read(&mut buffer[w..9]) {
+        w += match stream.read(&mut buffer[w..9]) {
             Ok(0) => break,  // EOF from server
             Err(_) => break, // What the hell happened
-            Ok(amount_read) => w += amount_read,
-        }
+            Ok(amount_read) => amount_read,
+        };
 
         // more data required
         if w < 9 {
