@@ -11,12 +11,11 @@ const SERVER_EOF: &str = "The client has disconnected";
 const SERVER_ERR: &str = "Random error has occured";
 const MSG_OUT_OF_RANGE: &str = "The message is too large";
 const ERR_INVALID_USERNAME: &str = "Invalid username";
-const ERR_ALREADY_CONNECTED: &str = "Someone already connected under your name";
 
 enum Event {
     Joined(String),
     Left(String),
-    Sent(String, String)
+    Sent(String, String),
 }
 
 fn send_to_socket(stream: &mut TcpStream, buff: &[u8], n: usize) {
@@ -65,8 +64,8 @@ fn validate_username(s: &str) -> bool {
     s.chars().all(|x| x.is_alphanumeric())
 }
 
-// Send the message to all clients except the one specified in the `but` field. 
-fn send_to_all_but(message : &str, but : &str, clients : &mut HashMap<String, TcpStream>) {
+// Send the message to all clients except the one specified in the `but` field.
+fn send_to_all_but(message: &str, but: &str, clients: &mut HashMap<String, TcpStream>) {
     for (username, stream) in clients.iter_mut() {
         if username != but {
             send_to_socket(stream, message.as_bytes(), message.len());
@@ -83,14 +82,12 @@ fn sender_thread(clients: Arc<Mutex<HashMap<String, TcpStream>>>, rx: Receiver<E
             let (message, username) = match event {
                 Event::Joined(username) => {
                     let message = format!("* {username} has joined the room\n");
-                    print!("<--- {message}");
                     (message, username)
-                },
+                }
                 Event::Left(username) => {
                     let message = format!("* {username} has left the room\n");
-                    print!("<--- {message}");
                     (message, username)
-                },
+                }
                 Event::Sent(username, message) => {
                     let message = format!("[{username}] {message}\n");
                     (message, username)
@@ -103,7 +100,7 @@ fn sender_thread(clients: Arc<Mutex<HashMap<String, TcpStream>>>, rx: Receiver<E
 }
 
 /// Perform the handshake with the new client: ask for the username and validate it.
-fn handshake(stream: &mut TcpStream) -> Result<String, &'static str> {
+fn handshake(stream: &mut TcpStream, clients : &Arc<Mutex<HashMap<String, TcpStream>>>) -> Result<String, &'static str> {
     send_to_socket(stream, WELCOME_MESSAGE.as_bytes(), WELCOME_MESSAGE.len());
 
     let username = readline(stream);
@@ -111,7 +108,8 @@ fn handshake(stream: &mut TcpStream) -> Result<String, &'static str> {
     match username {
         Err(m) => Err(m),
         Ok(uname) => {
-            if validate_username(&uname) {
+            let clients_map = clients.lock().unwrap();
+            if validate_username(&uname) && !clients_map.contains_key(&uname) {
                 Ok(uname)
             } else {
                 Err(ERR_INVALID_USERNAME)
@@ -120,73 +118,71 @@ fn handshake(stream: &mut TcpStream) -> Result<String, &'static str> {
     }
 }
 
-fn handle_stream(
+/// Receives messages from a client and distributes them upon reception
+fn receive_messages(
     mut stream: TcpStream,
-    clients: Arc<Mutex<HashMap<String, TcpStream>>>,
     tx: Sender<Event>,
+    clients: Arc<Mutex<HashMap<String, TcpStream>>>,
+    username: String,
 ) {
-    println!("New socket opened");
-
-    let username = match handshake(&mut stream) {
-        Ok(username) => {
-            println!("Validating {username}");
-            let mut clients_map = clients.lock().unwrap();
-
-            if clients_map.contains_key(&username) {
-                send_to_socket(
-                    &mut stream,
-                    ERR_ALREADY_CONNECTED.as_bytes(),
-                    ERR_ALREADY_CONNECTED.len(),
-                );
-                return;
-            } else {
-                let in_room = clients_map.keys().fold(String::new(), |acc, ele| acc + ", " + ele);
-                let in_room_message = format!("*Welcome. Users in room: {in_room}\n");
-                println!("<-- {in_room_message}");
-                send_to_socket(&mut stream, in_room_message.as_bytes(), in_room_message.len());
-
-                clients_map.insert(
-                    username.clone(),
-                    stream
-                        .try_clone()
-                        .expect("Unable to clone a TcpSocket... disconnected?"),
-                );
-
-                tx.send(Event::Joined(username.clone())).unwrap();
-            }
-
-            username
-        }
-        Err(_) => {
-            return;
-        }
-    };
-
-
     loop {
         let line = readline(&mut stream);
+
         match line {
-            Ok(msg) => {
-                tx.send(Event::Sent(username.clone(), msg)).unwrap();
-            },
-            Err(e) => {
-                println!("Received error: {e}");
-
-                {
-                    let mut clients_map = clients.lock().unwrap();
-                    clients_map.remove_entry(&username).unwrap();
-                }
-
-                tx.send(Event::Left(username)).unwrap();
-                break
-            }
+            Ok(msg) => tx.send(Event::Sent(username.clone(), msg)).unwrap(),
+            Err(_) => break,
         }
+    }
+
+    let mut clients_map = clients.lock().unwrap();
+    clients_map.remove_entry(&username).unwrap();
+    tx.send(Event::Left(username)).unwrap();
+}
+
+/// Send the list of members in the room to the stream
+fn send_room_description(
+    stream: &mut TcpStream,
+    clients: &mut Arc<Mutex<HashMap<String, TcpStream>>>,
+) {
+    let clients_map = clients.lock().unwrap();
+
+    let in_room = clients_map
+        .keys()
+        .fold(String::new(), |acc, ele| acc + ", " + ele);
+
+    let in_room_message = format!("*Welcome. Users in room: {in_room}\n");
+
+    send_to_socket(stream, in_room_message.as_bytes(), in_room_message.len());
+}
+
+fn handle_stream(
+    mut stream: TcpStream,
+    mut clients: Arc<Mutex<HashMap<String, TcpStream>>>,
+    tx: Sender<Event>,
+) {
+    let username = match handshake(&mut stream, &clients) {
+        Ok(username) => username,
+        Err(_) => return
     };
 
+    send_room_description(&mut stream, &mut clients);
+
+    {
+        // insert the client in the map and send the joined event
+        let mut clients_map = clients.lock().unwrap();
+        clients_map.insert(
+            username.to_string(),
+            stream
+                .try_clone()
+                .expect("Unable to clone a TcpSocket... disconnected?"),
+        );
+        tx.send(Event::Joined(username.to_string())).unwrap();
+    }
+
+    receive_messages(stream, tx, clients, username);
 }
 
 fn main() -> std::io::Result<()> {
-    println!("Starting listener");
     let listener = TcpListener::bind("0.0.0.0:80")?;
 
     let (tx, rx): (Sender<Event>, Receiver<Event>) = channel();
